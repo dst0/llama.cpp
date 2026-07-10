@@ -677,6 +677,24 @@ struct server_slot {
                 prompt_clear();
             }
 
+            // erase generation-phase checkpoints to free slots for next request's input checkpoints
+            if (!task->is_child()) {
+                const auto prompt_end = task->n_tokens();
+                int erased = 0;
+                for (auto it = prompt.checkpoints.begin(); it != prompt.checkpoints.end();) {
+                    if ((*it)->pos_min > prompt_end) {
+                        SLT_DBG(*this, "release: erasing generation checkpoint (pos_min=%d > prompt_end=%d)\n", (*it)->pos_min, prompt_end);
+                        it = prompt.checkpoints.erase(it);
+                        erased++;
+                    } else {
+                        ++it;
+                    }
+                }
+                if (erased > 0) {
+                    SLT_INF(*this, "release: erased %d generation checkpoints (prompt_end=%d)\n", erased, prompt_end);
+                }
+            }
+
             callback_on_reset(*this);
 
             reset();
@@ -3821,7 +3839,15 @@ private:
 
                 SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d\n", n_keep, n_left, n_discard);
 
-                slot.mem.seq_rm (slot.id, n_keep            , n_keep + n_discard);
+                if (!llama_memory_seq_rm(llama_get_memory(ctx_tgt), slot.id, n_keep, n_keep + n_discard)) {
+                    SLT_WRN(slot, "context shift seq_rm [%d, %d) failed, continuing\n", n_keep, n_keep + n_discard);
+                }
+
+                if (ctx_dft) {
+                    if (!llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, n_keep, n_keep + n_discard)) {
+                        SLT_WRN(slot, "context shift seq_rm dft [%d, %d) failed, continuing\n", n_keep, n_keep + n_discard);
+                    }
+                }
                 slot.mem.seq_add(slot.id, n_keep + n_discard, slot.prompt.tokens.pos_next(), -n_discard);
 
                 // add generated tokens to cache
@@ -3947,8 +3973,12 @@ private:
                     GGML_ASSERT(ckpt.load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY));
                 }
 
-                if (!llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, ckpt.pos_max + 1, -1)) {
-                    GGML_ABORT("failed to remove sequence %d\n", slot.id);
+                {
+                    const llama_pos p0_ckpt = ckpt.pos_max + 1;
+                    auto * mem_dft = llama_get_memory(ctx_dft);
+                    if (!llama_memory_seq_rm(mem_dft, slot.id, p0_ckpt, -1)) {
+                        SLT_WRN(slot, "ckpt seq_rm [%d, end) failed, skipping\n", p0_ckpt);
+                    }
                 }
             }
 
@@ -4053,6 +4083,7 @@ private:
 
                         // keep track how many tokens we can reuse from the previous state
                         int n_past = 0;
+                        int n_past_common = 0;
 
                         // empty prompt passed -> release the slot and send empty response
                         if (input_tokens.empty()) {
@@ -4121,6 +4152,7 @@ private:
                             if (slot.task->params.cache_prompt && !slot.task->is_stateless()) {
                                 // reuse any previously computed tokens that are common with the new prompt
                                 n_past = slot.prompt.tokens.get_common_prefix(input_tokens);
+                                n_past_common = n_past;
 
                                 // the children start from the shared prefix, do not go past it
                                 if (slot.task->n_tokens_shared > 0) {
@@ -4180,7 +4212,15 @@ private:
 
                                             const int64_t kv_shift = (int64_t) head_p - (int64_t) head_c;
 
-                                            slot.mem.seq_rm (slot.id, head_p, head_c);
+                                            if (!llama_memory_seq_rm(llama_get_memory(ctx_tgt), slot.id, head_p, head_c)) {
+                                                SLT_WRN(slot, "cache reuse seq_rm [%zu, %zu) failed, continuing\n", head_p, head_c);
+                                            }
+
+                                            if (ctx_dft) {
+                                                if (!llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, head_p, head_c)) {
+                                                    SLT_WRN(slot, "cache reuse seq_rm dft [%zu, %zu) failed, continuing\n", head_p, head_c);
+                                                }
+                                            }
                                             slot.mem.seq_add(slot.id, head_c, head_c + n_match, kv_shift);
 
                                             for (size_t i = 0; i < n_match; i++) {
@@ -4276,11 +4316,7 @@ private:
                                             const auto & cur = *ckpt;
                                             // guarantee that a checkpoint will result in at least one token being processed [TAG_PROMPT_LOGITS]
                                             SLT_TRC(slot, "checking checkpoint with [%d, %d] against %d...\n", cur.pos_min, cur.pos_max, pos_min_thold);
-                                            // workaround for [TAG_CHECKPOINTS_FIX_POS_MIN]
-                                            if (cur.pos_max > pos_next) {
-                                                return false;
-                                            }
-                                            return cur.pos_min < pos_min_thold || cur.pos_min == 0;
+                                            return n_past >= cur.pos_max;
                                         }
                                     );
 
@@ -4309,6 +4345,7 @@ private:
 
                                         pos_next = std::min(pos_next, std::max(cur.pos_min + 1, cur.pos_max));
                                         n_past   = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) cur.n_tokens);
+                                        n_past_common = std::min(n_past_common, (int) cur.n_tokens);
                                         SLT_TRC(slot, "restored context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_past = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_past, (float) cur.size() / 1024 / 1024);
                                     }
 
@@ -4317,15 +4354,16 @@ private:
                                                 "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
                                         pos_next = 0;
                                         n_past = 0;
+                                        n_past_common = 0;
                                     }
                                 }
                             }
 
                             {
-                                // erase any checkpoints with pos_max > pos_next, or that cover tokens not shared with the new prompt
+                                // erase checkpoints that are beyond the current request, or that cover tokens not shared with the new prompt
                                 for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end();) {
                                     const auto & cur = **it;
-                                    if (cur.pos_max > pos_next || cur.n_tokens > n_prefix) {
+                                    if (cur.pos_max > (int) slot.task->n_tokens() || cur.n_tokens > n_prefix) {
                                         SLT_TRC(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_swa = %d, pos_next = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_swa, pos_next, (float) cur.size() / 1024 / 1024);
                                         it = slot.prompt.checkpoints.erase(it);
                                     } else {
@@ -4347,7 +4385,7 @@ private:
 
                         metrics.add_prompt_cached(n_past);
 
-                        slot.prompt.tokens.keep_first(n_past);
+                        slot.prompt.tokens.keep_first(std::max((size_t) n_past_common, (size_t) n_past));
 
                         // this is to signal the client that the request has started processing
                         if (slot.task->params.stream) {
@@ -4377,7 +4415,14 @@ private:
 
                     SLT_TRC(slot, "cached n_tokens = %d, memory_seq_rm [%d, end)\n", slot.prompt.n_tokens(), p0);
 
-                    slot.mem.seq_rm(slot.id, p0, -1);
+                    if (!llama_memory_seq_rm(llama_get_memory(ctx_tgt), slot.id, p0, -1)) {
+                        SLT_WRN(slot, "memory_seq_rm [%d, end) failed, continuing\n", p0);
+                    }
+                    if (ctx_dft) {
+                        if (!llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, p0, -1)) {
+                            SLT_WRN(slot, "dft: memory_seq_rm [%d, end) failed, continuing\n", p0);
+                        }
+                    }
 
                     // shared prompt prefix: once it is processed, the children continue from it with their own prompt
                     bool wait_shared = false;
@@ -5003,11 +5048,23 @@ private:
 
                         GGML_ASSERT(ckpt.load_tgt(slot.ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY));
 
-                        if (slot.ctx_dft) {
-                            GGML_ASSERT(ckpt.load_dft(slot.ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY));
+                        {
+                            const llama_pos p0_ckpt = ckpt.pos_max + 1;
+                            auto * mem_tgt = llama_get_memory(slot.ctx_tgt);
+                            if (!llama_memory_seq_rm(mem_tgt, slot.id, p0_ckpt, -1)) {
+                                SLT_WRN(slot, "rollback seq_rm [%d, end) failed, skipping\n", p0_ckpt);
+                            }
                         }
 
-                        slot.mem.seq_rm(slot.id, ckpt.pos_max + 1, -1);
+                        if (slot.ctx_dft) {
+                            GGML_ASSERT(ckpt.load_dft(slot.ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY));
+
+                            const llama_pos p0_ckpt = ckpt.pos_max + 1;
+                            auto * mem_dft = llama_get_memory(slot.ctx_dft);
+                            if (!llama_memory_seq_rm(mem_dft, slot.id, p0_ckpt, -1)) {
+                                SLT_WRN(slot, "rollback seq_rm dft [%d, end) failed, skipping\n", p0_ckpt);
+                            }
+                        }
 
                         slot.prompt.tokens.keep_first(ckpt.n_tokens);
                         common_sampler_copy(smpl_save.get(), slot.smpl.get());
@@ -5054,7 +5111,20 @@ private:
             slot.sampled = ids.back(); // last accepted token
             SLT_DBG(slot, "add accepted tokens: sampled=%d, ids.size=%zu, n_draft=%zu\n", slot.sampled, ids.size(), n_draft);
 
-            slot.mem.seq_rm(slot.id, slot.prompt.tokens.pos_next(), -1);
+            {
+                const llama_pos p0_sp = slot.prompt.tokens.pos_next();
+                auto * mem_tgt = llama_get_memory(slot.ctx_tgt);
+                if (!llama_memory_seq_rm(mem_tgt, slot.id, p0_sp, -1)) {
+                    SLT_WRN(slot, "spec: seq_rm [%d, end) failed, skipping\n", p0_sp);
+                }
+            }
+            if (slot.ctx_dft) {
+                const llama_pos p0_sp = slot.prompt.tokens.pos_next();
+                auto * mem_dft = llama_get_memory(slot.ctx_dft);
+                if (!llama_memory_seq_rm(mem_dft, slot.id, p0_sp, -1)) {
+                    SLT_WRN(slot, "spec dft: seq_rm [%d, end) failed, skipping\n", p0_sp);
+                }
+            }
 
             for (size_t i = 0; i < ids.size(); ++i) {
                 completion_token_output result;
