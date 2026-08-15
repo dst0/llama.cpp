@@ -224,6 +224,10 @@ Chat template and parser:
 - [Auto parser](docs/autoparser.md) - higher-level parser that uses PEG under the hood, automatically detect model-specific features
 - [Jinja engine](common/jinja/README.md)
 
+## Commands
+
+- Poll running background tasks with reasonable intervals that approximately equal to ETA or reasonably smaller when closer progress monitoring is absolutely necessary. But not repeatedly in tight loops. Rely on reactive completion messages instead.
+
 ## Test Quality & Adversarial Review
 
 - Tests must never be added solely as mechanical line-fillers to pass coverage gates. Tests must meaningfully verify domain logic, invariant preservation, realistic crash recovery, positive cases, negative cases, and edge cases.
