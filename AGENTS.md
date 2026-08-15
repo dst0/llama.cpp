@@ -117,7 +117,6 @@ Code comments:
 
 n_ctx = read_metadata("context_length", 1024);
 
-
 // BAD (too verbose, restates what the code already says)
 
 // Populate the n_ctx from metadata key name "context_length", default to 1024 if the key doesn't exist
@@ -133,7 +132,6 @@ if (has_client) {
   task_queue->on_idle(); // also signal child disconnection
 }
 
-
 // BAD (too verbose, restates what the code already says)
 
 // Instead of blocking indefinitely on accept(), the server polls the listening socket with idle_interval as a timeout. If no new client connects within that interval, it fires task_queue->on_idle() and loops back
@@ -146,7 +144,6 @@ if (has_client) {
 n_tokens = 0;
 // ... (a lot of code)
 release();
-
 
 // BAD (addresses the user's task, meaningless out of context)
 
@@ -174,7 +171,6 @@ ggml_tensor * inp_pos = build_inp_pos();
 // - write new kv at cache row g+1, sample with lm_head[g]
 // - write result to out_code_cache[g+1]
 
-
 // BAD (comment is long and is forced to fit into a fixed column size, it is very annoying to read as a reviewer)
 
 // one autoregressive decode step of the 5-layer code_predictor. See the
@@ -192,13 +188,11 @@ Commit message:
 ```
 // BEST: Let the user write the commit
 
-
 // GOOD: Write a concise commit
 
 llama : fix KV being cleared during context shift
 
 Assisted-by: Claude Sonnet
-
 
 // BAD: Write a verbose commit
 
@@ -249,3 +243,11 @@ Chat template and parser:
 
 Testing:
 - [Slice model](skills/slice-model/SKILL.md) - build a small slice (few layers/experts) of a big HF model without downloading the full weights, to test conversion and inference
+
+## Test Quality & Adversarial Review
+
+- Tests must never be added solely as mechanical line-fillers to pass coverage gates. Tests must meaningfully verify domain logic, invariant preservation, realistic crash recovery, positive cases, negative cases, and edge cases.
+- Bug fixes must start with a reproducible failing regression test before writing the fix.
+- For non-trivial features, bug fixes, or test additions, automatically spawn an adversarial test-critic subagent to review the tests. The critic must evaluate whether the suite verifies real behavior vs artificial line coverage, identifies missing edge cases, and flags fragile/vacuous tests before work is completed.
+- Never use coverage bypass comments (e.g. `/* v8 ignore */`, `#[cfg(not(coverage))]`, `# pragma: no cover`) to bypass coverage gates. All code in the repository must be reachable and exercised by tests; dead or unreachable code must be deleted rather than kept or suppressed (except rare compiler/type-exhaustiveness edge cases where a branch is syntactically required but provably unreachable at runtime).
+- If you create or modify a test file, run it and iterate on test or implementation until it passes.
