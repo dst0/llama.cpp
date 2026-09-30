@@ -231,3 +231,7 @@ Chat template and parser:
 - For non-trivial features, bug fixes, or test additions, automatically spawn an adversarial test-critic subagent to review the tests. The critic must evaluate whether the suite verifies real behavior vs artificial line coverage, identifies missing edge cases, and flags fragile/vacuous tests before work is completed.
 - Never use coverage bypass comments (e.g. `/* v8 ignore */`, `#[cfg(not(coverage))]`, `# pragma: no cover`) to bypass coverage gates. All code in the repository must be reachable and exercised by tests; dead or unreachable code must be deleted rather than kept or suppressed (except rare compiler/type-exhaustiveness edge cases where a branch is syntactically required but provably unreachable at runtime).
 - If you create or modify a test file, run it and iterate on test or implementation until it passes.
+
+## Workflow Guidelines
+
+- **Worktree Cleanup**: Once a pull request is merged, always remove its temporary git worktree (`git worktree remove <path>`) and prune stale tracking (`git worktree prune`) to prevent disk space exhaustion.
