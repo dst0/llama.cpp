@@ -4152,7 +4152,6 @@ private:
                             if (slot.task->params.cache_prompt && !slot.task->is_stateless()) {
                                 // reuse any previously computed tokens that are common with the new prompt
                                 n_past = slot.prompt.tokens.get_common_prefix(input_tokens);
-                                n_past_common = n_past;
 
                                 // the children start from the shared prefix, do not go past it
                                 if (slot.task->n_tokens_shared > 0) {
@@ -4169,6 +4168,9 @@ private:
                                     SLT_DBG(slot, "only caching to alora invocation start (n_past = %d, alora_invocation_start = %d)\n", n_past, slot.alora_invocation_start);
                                     n_past = std::min(n_past, slot.alora_invocation_start - 1);
                                 }
+
+                                // the reusable common prefix, after the limits above
+                                n_past_common = n_past;
 
                                 const auto n_cache_reuse = slot.task->params.n_cache_reuse;
 
@@ -4385,7 +4387,11 @@ private:
 
                         metrics.add_prompt_cached(n_past);
 
-                        slot.prompt.tokens.keep_first(std::max((size_t) n_past_common, (size_t) n_past));
+                        // keep the common prefix of a restored checkpoint, but always leave at least one
+                        // prompt token to evaluate [TAG_PROMPT_LOGITS]
+                        const int n_keep = std::min(std::max(n_past_common, n_past), std::max(slot.task->n_tokens() - 1, 0));
+
+                        slot.prompt.tokens.keep_first(n_keep);
 
                         // this is to signal the client that the request has started processing
                         if (slot.task->params.stream) {
