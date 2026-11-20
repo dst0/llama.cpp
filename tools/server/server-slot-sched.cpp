@@ -34,7 +34,8 @@ server_prompt_reuse server_prompt::get_reuse(int32_t n_prefix, bool has_new_toke
             const auto & cur = *ckpt;
             // guarantee that a checkpoint will result in at least one token being processed [TAG_PROMPT_LOGITS]
             SRV_TRC("checking checkpoint with [%d, %d] against %d...\n", cur.pos_min, cur.pos_max, pos_min_thold);
-            return n_prefix >= cur.pos_max;
+            // the checkpoint must hold only shared tokens: a recurrent state cannot drop the others
+            return cur.n_tokens <= n_prefix;
         }
     );
 

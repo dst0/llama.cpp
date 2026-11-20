@@ -129,3 +129,48 @@ def test_hybrid_prompt_checkpoint_is_reused_across_turns():
     assert [p["id"] for p in top_cached] == [p["id"] for p in top_fresh]
     for p_cached, p_fresh in zip(top_cached, top_fresh):
         assert p_cached["logprob"] == pytest.approx(p_fresh["logprob"], abs=1e-3)
+
+
+@pytest.mark.parametrize("n_shared,n_cached", [
+    # the checkpoint holds tokens [0, 195], all shared with the new prompt: restore it
+    (196, 196),
+    # the checkpoint also holds token 195, which the new prompt does not share: do not restore it
+    (195, 0),
+])
+def test_hybrid_checkpoint_must_lie_inside_shared_prefix(n_shared, n_cached):
+    global server
+    server = ServerPreset.tinylfm3omni()
+    server.n_slots = 1
+    server.n_batch = 16
+    # one token per ubatch: the runs with and without the cache go through the same kernels
+    server.n_ubatch = 1
+    server.cache_ram = 0
+    server.temperature = 0.0
+    server.start()
+
+    def complete(prompt, cache_prompt):
+        res = server.make_request("POST", "/completion", data={
+            "prompt": prompt,
+            "n_predict": 4,
+            "n_probs": 5,
+            "cache_prompt": cache_prompt,
+            "return_tokens": True,
+        })
+        assert res.status_code == 200
+        return res.body
+
+    def top_logprobs(body):
+        return [(p["id"], p["logprob"]) for p in body["completion_probabilities"][0]["top_logprobs"]]
+
+    # the prompt checkpoint is made 4 tokens before the end of the prefix: n_tokens = 196, pos_max = 195
+    prefix = [1000 + i for i in range(200)]
+    prompt = prefix[:n_shared] + [5000 + i for i in range(20)]
+
+    expected = complete(prompt, False)
+    complete(prefix, True)
+    actual = complete(prompt, True)
+
+    assert actual["tokens"] == expected["tokens"]
+    assert top_logprobs(actual) == top_logprobs(expected)
+    assert actual["timings"]["cache_n"] == n_cached
+    assert actual["timings"]["prompt_n"] + actual["timings"]["cache_n"] == len(prompt)
