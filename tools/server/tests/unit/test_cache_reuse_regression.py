@@ -1,3 +1,7 @@
+import os
+import re
+import tempfile
+
 import pytest
 from utils import *
 
@@ -131,13 +135,16 @@ def test_hybrid_prompt_checkpoint_is_reused_across_turns():
         assert p_cached["logprob"] == pytest.approx(p_fresh["logprob"], abs=1e-3)
 
 
-@pytest.mark.parametrize("n_shared,n_cached", [
+@pytest.mark.parametrize("n_shared,n_new,n_cached", [
     # the checkpoint holds tokens [0, 195], all shared with the new prompt: restore it
-    (196, 196),
+    (196, 20, 196),
     # the checkpoint also holds token 195, which the new prompt does not share: do not restore it
-    (195, 0),
+    (195, 20, 0),
+    # the new prompt ends with token 195, which must be evaluated again: do not restore the checkpoint,
+    # use the one at n_tokens = 192 that the uncached run of the 196-token prompt made
+    (196, 0, 192),
 ])
-def test_hybrid_checkpoint_must_lie_inside_shared_prefix(n_shared, n_cached):
+def test_hybrid_checkpoint_must_lie_inside_shared_prefix(n_shared, n_new, n_cached):
     global server
     server = ServerPreset.tinylfm3omni()
     server.n_slots = 1
@@ -164,7 +171,7 @@ def test_hybrid_checkpoint_must_lie_inside_shared_prefix(n_shared, n_cached):
 
     # the prompt checkpoint is made 4 tokens before the end of the prefix: n_tokens = 196, pos_max = 195
     prefix = [1000 + i for i in range(200)]
-    prompt = prefix[:n_shared] + [5000 + i for i in range(20)]
+    prompt = prefix[:n_shared] + [5000 + i for i in range(n_new)]
 
     expected = complete(prompt, False)
     complete(prefix, True)
@@ -185,6 +192,9 @@ def test_swa_checkpoint_restore_reports_reused_tokens():
     server.n_ubatch = 16
     server.cache_ram = 0
     server.temperature = 0.0
+    server.debug = True
+    fd, server.log_path = tempfile.mkstemp(suffix='.log')
+    os.close(fd)
     server.start()
 
     def tokenize(content):
@@ -211,7 +221,14 @@ def test_swa_checkpoint_restore_reports_reused_tokens():
 
     # 4 tokens: the checkpoint 4 tokens before the end of the prompt holds exactly the prefix
     complete(prefix + tokenize("The quick brown fox jumps over the lazy dog")[:4], True)
+    log_pos = os.path.getsize(server.log_path)
     actual = complete(prompt, True)
+
+    # the reused tokens come from the restored checkpoint, not from the live state
+    with open(server.log_path) as f:
+        f.seek(log_pos)
+        log = f.read()
+    assert re.search(rf"restored context checkpoint \(pos_min = \d+, pos_max = {len(prefix) - 1}, n_tokens = {len(prefix)},", log)
 
     assert actual["timings"]["cache_n"] == len(prefix)
     assert actual["timings"]["prompt_n"] + actual["timings"]["cache_n"] == len(prompt)

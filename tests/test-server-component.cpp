@@ -380,6 +380,12 @@ static void test_server_prompt_reuse(testing & t) {
         t.assert_true("cut at 99, checkpoint", res.ckpt && res.ckpt->pos_max == 95);
         t.assert_equal("cut at 99, n_past", 96, res.n_past);
 
+        // the same prompt must evaluate its last token, the state at 109 already holds it
+        const auto prompt_end = make_prompt({{95, 95}, {99, 99}, {109, 109}});
+        res = prompt_end.get_reuse(110, false, 0, pos_min);
+        t.assert_true("same prompt, checkpoint at the end", res.ckpt && res.ckpt->pos_max == 99);
+        t.assert_equal("same prompt, checkpoint at the end, n_past", 100, res.n_past);
+
         res = prompt.get_reuse(50, true, 0, pos_min);
         t.assert_true("cut at 50, no checkpoint", res.ckpt == nullptr);
         t.assert_equal("cut at 50, n_past", 0, res.n_past);

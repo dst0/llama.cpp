@@ -26,16 +26,18 @@ server_prompt_reuse server_prompt::get_reuse(int32_t n_prefix, bool has_new_toke
         return res;
     }
 
+    // a checkpoint must hold only shared tokens, a recurrent state cannot drop the others
+    // guarantee that a checkpoint will result in at least one token being processed [TAG_PROMPT_LOGITS]
+    const int32_t n_tokens_max = n_prefix - (has_new_tokens ? 0 : 1);
+
     // search for a context checkpoint
     const auto it = std::find_if(
         checkpoints.rbegin(),
         checkpoints.rend(),
         [&](const auto & ckpt) {
             const auto & cur = *ckpt;
-            // guarantee that a checkpoint will result in at least one token being processed [TAG_PROMPT_LOGITS]
-            SRV_TRC("checking checkpoint with [%d, %d] against %d...\n", cur.pos_min, cur.pos_max, pos_min_thold);
-            // the checkpoint must hold only shared tokens: a recurrent state cannot drop the others
-            return cur.n_tokens <= n_prefix;
+            SRV_TRC("checking checkpoint with [%d, %d], n_tokens = %" PRId64 " against %d...\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_tokens_max);
+            return cur.n_tokens <= n_tokens_max;
         }
     );
 
