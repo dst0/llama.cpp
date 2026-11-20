@@ -808,9 +808,10 @@ def test_completion_checkpoint_kept_after_restore():
     cache_n(prefix + suffixes[0][:4])
 
     # suffixes longer than n_ubatch + 4: no new checkpoint within the prefix, only the restored one can be reused
+    # all tokens of the restored checkpoint are kept, its last token is not evaluated again
     for suffix in suffixes[1:]:
         assert len(suffix) > server.n_ubatch + 4
-        assert cache_n(prefix + suffix) == len(prefix) - 1
+        assert cache_n(prefix + suffix) == len(prefix)
 
 
 # hybrid model with SWA: a checkpoint or a state right before the new tokens must be reused, even if it is less than n_swa tokens away

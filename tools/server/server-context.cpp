@@ -4308,16 +4308,16 @@ private:
                             SLT_WRN(slot, "n_past was set to %d\n", n_past);
                         }
 
+                        // keep the common prefix of a restored checkpoint, but always leave at least one
+                        // prompt token to evaluate [TAG_PROMPT_LOGITS]
+                        n_past = std::min(std::max(n_past_common, n_past), std::max(slot.task->n_tokens() - 1, 0));
+
                         slot.stats.n_prompt_cached    = n_past;
                         slot.stats.n_prompt_processed = 0;
 
                         metrics.add_prompt_cached(n_past);
 
-                        // keep the common prefix of a restored checkpoint, but always leave at least one
-                        // prompt token to evaluate [TAG_PROMPT_LOGITS]
-                        const int n_keep = std::min(std::max(n_past_common, n_past), std::max(slot.task->n_tokens() - 1, 0));
-
-                        slot.prompt.tokens.keep_first(n_keep);
+                        slot.prompt.tokens.keep_first(n_past);
 
                         // this is to signal the client that the request has started processing
                         if (slot.task->params.stream) {

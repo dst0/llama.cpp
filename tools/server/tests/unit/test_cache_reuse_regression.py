@@ -174,3 +174,50 @@ def test_hybrid_checkpoint_must_lie_inside_shared_prefix(n_shared, n_cached):
     assert top_logprobs(actual) == top_logprobs(expected)
     assert actual["timings"]["cache_n"] == n_cached
     assert actual["timings"]["prompt_n"] + actual["timings"]["cache_n"] == len(prompt)
+
+
+def test_swa_checkpoint_restore_reports_reused_tokens():
+    # all tokens of a restored SWA checkpoint are kept, so they must be reported as cached
+    global server
+    server = ServerPreset.tinygemma3()
+    server.n_slots = 1
+    server.n_batch = 16
+    server.n_ubatch = 16
+    server.cache_ram = 0
+    server.temperature = 0.0
+    server.start()
+
+    def tokenize(content):
+        res = server.make_request("POST", "/tokenize", data={"content": content})
+        assert res.status_code == 200
+        return res.body["tokens"]
+
+    def complete(prompt, cache_prompt):
+        res = server.make_request("POST", "/completion", data={
+            "prompt": prompt,
+            "n_predict": 4,
+            "n_probs": 5,
+            "cache_prompt": cache_prompt,
+        })
+        assert res.status_code == 200
+        return res.body
+
+    prefix = tokenize("Purple elephants quietly compose sonnets about tax law in the moonlight")
+    suffix = tokenize("Seven tiny robots repaired the broken lighthouse lens before the storm arrived, then danced on the rocks until the morning tide came in")
+    assert len(suffix) > server.n_ubatch + 4
+    prompt = prefix + suffix
+
+    expected = complete(prompt, False)
+
+    # 4 tokens: the checkpoint 4 tokens before the end of the prompt holds exactly the prefix
+    complete(prefix + tokenize("The quick brown fox jumps over the lazy dog")[:4], True)
+    actual = complete(prompt, True)
+
+    assert actual["timings"]["cache_n"] == len(prefix)
+    assert actual["timings"]["prompt_n"] + actual["timings"]["cache_n"] == len(prompt)
+
+    top_actual = actual["completion_probabilities"][0]["top_logprobs"]
+    top_expected = expected["completion_probabilities"][0]["top_logprobs"]
+    assert [p["id"] for p in top_actual] == [p["id"] for p in top_expected]
+    for p_actual, p_expected in zip(top_actual, top_expected):
+        assert p_actual["logprob"] == pytest.approx(p_expected["logprob"], abs=1e-3)
